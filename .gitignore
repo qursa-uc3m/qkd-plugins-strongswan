@@ -1,0 +1,22 @@
+# Autotools generated files
+aclocal.m4
+ar-lib
+autom4te.cache/
+compile
+config.*
+configure
+depcomp
+install-sh
+libtool
+ltmain.sh
+m4/
+missing
+Makefile
+Makefile.in
+
+# Object files, libraries, and binaries
+*.o
+*.lo
+*.la
+.libs/
+.deps/

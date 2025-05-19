@@ -1,0 +1,13 @@
+if ENABLE_QKD
+SUBDIRS_QKD = qkd
+else
+SUBDIRS_QKD = 
+endif
+
+if ENABLE_QKD_KEM
+SUBDIRS_QKD_KEM = qkd-kem
+else
+SUBDIRS_QKD_KEM = 
+endif
+
+SUBDIRS = $(SUBDIRS_QKD) $(SUBDIRS_QKD_KEM)
