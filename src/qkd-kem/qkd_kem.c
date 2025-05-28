@@ -137,6 +137,18 @@ static bool encaps_shared_secret(private_qkd_kem_t *this, chunk_t value) {
     unsigned long err;
     char err_buf[256];
 
+#ifdef QKD_CLIENT_INITIATED
+    DBG1(DBG_LIB,
+         "QKD-KEM plugin: Bob performing encapsulation (client-initiated)");
+    DBG1(DBG_LIB, "QKD-KEM plugin: Provider will handle QKD key generation "
+                  "during encapsulation");
+#elif defined(QKD_SERVER_INITIATED)
+    DBG1(DBG_LIB,
+         "QKD-KEM plugin: Alice performing encapsulation (server-initiated)");
+    DBG1(DBG_LIB, "QKD-KEM plugin: Provider will handle QKD key generation "
+                  "during encapsulation");
+#endif
+
     DBG1(DBG_LIB,
          "QKD-KEM plugin: Bob received public key from Alice, size: %zu bytes",
          value.len);
@@ -260,6 +272,18 @@ static bool set_ciphertext(private_qkd_kem_t *this, chunk_t value) {
     unsigned long err;
     char err_buf[256];
 
+#ifdef QKD_CLIENT_INITIATED
+    DBG1(DBG_LIB,
+         "QKD-KEM plugin: Alice performing decapsulation (client-initiated)");
+    DBG1(DBG_LIB, "QKD-KEM plugin: Provider will handle QKD key retrieval "
+                  "during decapsulation");
+#elif defined(QKD_SERVER_INITIATED)
+    DBG1(DBG_LIB,
+         "QKD-KEM plugin: Bob performing decapsulation (server-initiated)");
+    DBG1(DBG_LIB, "QKD-KEM plugin: Provider will handle QKD key retrieval "
+                  "during decapsulation");
+#endif
+
     if (this->ciphertext_len == 0) {
         this->ciphertext_len = value.len;
         DBG1(DBG_LIB,
@@ -332,20 +356,28 @@ METHOD(key_exchange_t, get_public_key, bool, private_qkd_kem_t *this,
     unsigned char *pubkey = NULL;
     size_t pubkey_len;
 
-    DBG1(DBG_LIB, "QKD-KEM plugin: retrieving public key");
+    DBG1(DBG_LIB, "QKD-KEM plugin: get_public_key()");
+    if (!this || !value) {
+        DBG1(DBG_LIB, "QKD-KEM plugin: Invalid parameters in get_public_key");
+        return FALSE;
+    }
 
+#ifdef QKD_CLIENT_INITIATED
+    // Client-initiated logic: Alice sends PQ public key first, Bob responds
+    // with ciphertext
     if (this->ciphertext) {
-        /* Bob - responder action */
-        DBG1(DBG_LIB, "QKD-KEM plugin: Sending ciphertext of length %zu",
-             this->ciphertext_len);
+        /* Bob - responder sends ciphertext back to Alice */
+        DBG1(DBG_LIB, "QKD-KEM plugin: IKE responder sending ciphertext "
+                      "(client-initiated)");
         *value =
             chunk_clone(chunk_create(this->ciphertext, this->ciphertext_len));
         return TRUE;
     }
 
+    /* Alice - initiator generates PQ keypair and sends public key */
     if (!this->key) {
-        DBG1(DBG_LIB, "QKD-KEM plugin: Alice generating key pair");
-        /* Alice - initiator action */
+        DBG1(DBG_LIB, "QKD-KEM plugin: IKE initiator generating PQ keypair "
+                      "(client-initiated)");
         EVP_PKEY_CTX *gen_ctx = EVP_PKEY_CTX_new_from_name(
             this->libctx, get_kem_name(this->method), NULL);
         if (!gen_ctx || !EVP_PKEY_keygen_init(gen_ctx) ||
@@ -356,50 +388,143 @@ METHOD(key_exchange_t, get_public_key, bool, private_qkd_kem_t *this,
         EVP_PKEY_CTX_free(gen_ctx);
     }
 
-    DBG1(DBG_LIB, "QKD-KEM plugin: Alice sending public key");
+#elif defined(QKD_SERVER_INITIATED)
+    // Server-initiated logic: Bob sends PQ public key first, Alice responds
+    // with ciphertext
+    if (this->ciphertext) {
+        /* Alice - initiator sends ciphertext back to Bob */
+        DBG1(DBG_LIB, "QKD-KEM plugin: IKE initiator sending ciphertext "
+                      "(server-initiated)");
+        *value =
+            chunk_clone(chunk_create(this->ciphertext, this->ciphertext_len));
+        return TRUE;
+    }
 
-    if (!EVP_PKEY_get_raw_public_key(this->key, NULL, &pubkey_len)) {
-        DBG1(DBG_LIB, "QKD-KEM plugin: Failed to retrieve raw public key");
+    /* Bob - responder generates PQ keypair and sends public key */
+    if (!this->key) {
+        DBG1(DBG_LIB, "QKD-KEM plugin: IKE responder generating PQ keypair "
+                      "(server-initiated)");
+
+        const char *kem_name = get_kem_name(this->method);
+        if (!kem_name) {
+            DBG1(DBG_LIB, "QKD-KEM plugin: Invalid KEM method");
+            return FALSE;
+        }
+
+        EVP_PKEY_CTX *gen_ctx =
+            EVP_PKEY_CTX_new_from_name(this->libctx, kem_name, NULL);
+        if (!gen_ctx) {
+            DBG1(DBG_LIB,
+                 "QKD-KEM plugin: Failed to create key generation context for "
+                 "%s",
+                 kem_name);
+            return FALSE;
+        }
+
+        if (!EVP_PKEY_keygen_init(gen_ctx)) {
+            DBG1(DBG_LIB,
+                 "QKD-KEM plugin: Failed to initialize key generation");
+            EVP_PKEY_CTX_free(gen_ctx);
+            return FALSE;
+        }
+
+        if (!EVP_PKEY_generate(gen_ctx, &this->key)) {
+            DBG1(DBG_LIB, "QKD-KEM plugin: Failed to generate keypair");
+            EVP_PKEY_CTX_free(gen_ctx);
+            return FALSE;
+        }
+
+        EVP_PKEY_CTX_free(gen_ctx);
+        DBG1(DBG_LIB, "QKD-KEM plugin: Successfully generated PQ keypair");
+    }
+#else
+#error "Must define either QKD_CLIENT_INITIATED or QKD_SERVER_INITIATED"
+#endif
+
+    // Common code for extracting and sending public key
+    // Add null check before calling EVP_PKEY_get_raw_public_key
+    if (!this->key) {
+        DBG1(DBG_LIB,
+             "QKD-KEM plugin: No key available for public key extraction");
         return FALSE;
     }
 
-    DBG1(DBG_LIB, "QKD-KEM plugin: Public key size: %zu bytes", pubkey_len);
+    if (!EVP_PKEY_get_raw_public_key(this->key, NULL, &pubkey_len)) {
+        DBG1(DBG_LIB, "QKD-KEM plugin: Failed to get public key length");
+        return FALSE;
+    }
+
+    DBG1(DBG_LIB, "QKD-KEM plugin: Public key length: %zu bytes", pubkey_len);
 
     pubkey = OPENSSL_malloc(pubkey_len);
-    if (!pubkey ||
-        !EVP_PKEY_get_raw_public_key(this->key, pubkey, &pubkey_len)) {
-        DBG1(DBG_LIB, "QKD-KEM plugin: Failed to retrieve raw public key");
+    if (!pubkey) {
+        DBG1(DBG_LIB,
+             "QKD-KEM plugin: Failed to allocate memory for public key");
+        return FALSE;
+    }
+
+    if (!EVP_PKEY_get_raw_public_key(this->key, pubkey, &pubkey_len)) {
+        DBG1(DBG_LIB, "QKD-KEM plugin: Failed to extract public key");
         OPENSSL_free(pubkey);
         return FALSE;
     }
 
-    DBG1(DBG_LIB, "QKD-KEM plugin: Public key retrieved successfully");
-
     *value = chunk_clone(chunk_create(pubkey, pubkey_len));
     OPENSSL_free(pubkey);
 
-    DBG1(DBG_LIB, "QKD-KEM plugin: Public key sent successfully");
-
+    DBG1(DBG_LIB, "QKD-KEM plugin: Public key sent successfully (%zu bytes)",
+         pubkey_len);
     return TRUE;
 }
 
 METHOD(key_exchange_t, set_public_key, bool, private_qkd_kem_t *this,
        chunk_t value) {
 
-    DBG1(DBG_LIB, "QKD-KEM plugin: setting public key (size: %zu bytes)",
+    DBG1(DBG_LIB, "QKD-KEM plugin: set_public_key() (size: %zu bytes)",
          value.len);
+    if (!this) {
+        return FALSE;
+    }
 
+#ifdef QKD_CLIENT_INITIATED
+    // Client-initiated: Alice sends PQ public key -> Bob encapsulates -> Alice
+    // decapsulates
     if (this->key) {
         /* Alice's case (initiator) - receives ciphertext from Bob */
-        DBG1(DBG_LIB, "QKD-KEM plugin: Alice received ciphertext, attempting "
-                      "decapsulation");
+        DBG1(DBG_LIB, "QKD-KEM plugin: IKE initiator performing decapsulation "
+                      "(client-initiated)");
         return set_ciphertext(this, value);
     }
 
-    /* Bob's case (responder) - receives Alice's public key */
-    DBG1(DBG_LIB,
-         "QKD-KEM plugin: Bob received public key, performing encapsulation");
+    /* Bob's case (responder) - receives Alice's PQ public key, performs
+     * encapsulation */
+    DBG1(DBG_LIB, "QKD-KEM plugin: IKE responder performing encapsulation "
+                  "(client-initiated)");
     return encaps_shared_secret(this, value);
+
+#elif defined(QKD_SERVER_INITIATED)
+    // Server-initiated: Bob sends PQ public key -> Alice encapsulates -> Bob
+    // decapsulates
+    if (this->key) {
+        /* Bob's case (responder) - receives ciphertext from Alice */
+        DBG1(DBG_LIB, "QKD-KEM plugin: IKE responder performing decapsulation "
+                      "(server-initiated)");
+        return set_ciphertext(this, value);
+    }
+
+    /* Alice's case (initiator) - receives Bob's PQ public key, performs
+     * encapsulation */
+    DBG1(DBG_LIB, "QKD-KEM plugin: IKE initiator performing encapsulation "
+                  "(server-initiated)");
+    return encaps_shared_secret(this, value);
+
+#else
+    // Add fallback for when compilation flags are missing
+    DBG1(DBG_LIB, "QKD-KEM plugin: ERROR - No QKD initiation mode defined!");
+    DBG1(DBG_LIB, "QKD-KEM plugin: Must compile with -DQKD_CLIENT_INITIATED or "
+                  "-DQKD_SERVER_INITIATED");
+    return FALSE;
+#endif
 }
 
 METHOD(key_exchange_t, get_shared_secret, bool, private_qkd_kem_t *this,
@@ -418,7 +543,12 @@ METHOD(key_exchange_t, get_method, key_exchange_method_t,
 
 METHOD(key_exchange_t, destroy, void, private_qkd_kem_t *this) {
     DBG1(DBG_LIB, "QKD-KEM plugin: destroy()");
+
     log_time(this);
+
+    if (!this) {
+        return;
+    }
 
     if (this->shared_secret) {
         OPENSSL_clear_free(this->shared_secret, this->shared_secret_len);
@@ -455,11 +585,12 @@ qkd_kem_t *qkd_kem_create(key_exchange_method_t method) {
     const char *kem_name = get_kem_name(method);
 
     if (!kem_name) {
-        DBG1(DBG_LIB, "QKD-KEM plugin: unsupported key exchange method");
+        DBG1(DBG_LIB, "QKD-KEM plugin: unsupported key exchange method %d",
+             method);
         return NULL;
-    } else {
-        DBG1(DBG_LIB, "QKD-KEM plugin: kem_name = %s", kem_name);
     }
+
+    DBG1(DBG_LIB, "QKD-KEM plugin: kem_name = %s", kem_name);
 
     INIT(this,
          .public =
@@ -473,11 +604,22 @@ qkd_kem_t *qkd_kem_create(key_exchange_method_t method) {
                          .destroy = _destroy,
                      },
              },
-         .method = method, .libctx = OSSL_LIB_CTX_new());
+         .method = method,
+         .libctx = OSSL_LIB_CTX_new(), // FIX: Create libctx BEFORE using it
+         .ctx = NULL, .key = NULL, .ciphertext = NULL, .ciphertext_len = 0,
+         .shared_secret = NULL, .shared_secret_len = 0);
+
+    // Check if libctx creation succeeded
+    if (!this->libctx) {
+        DBG1(DBG_LIB,
+             "QKD-KEM plugin: Failed to create OpenSSL library context");
+        free(this);
+        return NULL;
+    }
 
     DBG1(DBG_LIB, "QKD-KEM plugin: before loading qkd_kem_provider");
-
     if (!load_provider_to_context(this->libctx, "qkdkemprovider")) {
+        DBG1(DBG_LIB, "QKD-KEM plugin: Failed to load QKD-KEM provider");
         destroy(this);
         return NULL;
     }
@@ -486,11 +628,13 @@ qkd_kem_t *qkd_kem_create(key_exchange_method_t method) {
 
     this->ctx = EVP_PKEY_CTX_new_from_name(this->libctx, kem_name, NULL);
     if (!this->ctx) {
+        DBG1(DBG_LIB, "QKD-KEM plugin: Failed to create EVP_PKEY_CTX");
         destroy(this);
         return NULL;
     }
 
     gettimeofday(&this->create_time, NULL);
 
+    DBG1(DBG_LIB, "QKD-KEM plugin: Key exchange object created successfully");
     return &this->public;
 }

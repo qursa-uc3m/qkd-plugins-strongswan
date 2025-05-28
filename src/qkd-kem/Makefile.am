@@ -5,6 +5,13 @@ AM_CPPFLAGS = \
     $(QKD_ETSI_API_CFLAGS) \
     $(QKD_KEM_PROVIDER_CFLAGS)
 
+# Define whether the QKD connection is server or client initiated
+if QKD_SERVER_INITIATED
+AM_CPPFLAGS += -DQKD_SERVER_INITIATED=1
+else
+AM_CPPFLAGS += -DQKD_CLIENT_INITIATED=1
+endif
+
 AM_CFLAGS = \
     -Wall -Wno-format -Wno-format-security -Wno-pointer-sign -Wno-missing-field-initializers
 
