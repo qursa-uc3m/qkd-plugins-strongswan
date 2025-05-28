@@ -10,6 +10,13 @@ else
 AM_CPPFLAGS += -DETSI_014_API=1
 endif
 
+# Define whether the QKD connection is server or client initiated
+if QKD_SERVER_INITIATED
+AM_CPPFLAGS += -DQKD_SERVER_INITIATED=1
+else
+AM_CPPFLAGS += -DQKD_CLIENT_INITIATED=1
+endif
+
 AM_CFLAGS = \
 	-Wall -Wno-format -Wno-format-security -Wno-pointer-sign -Wno-missing-field-initializers
 

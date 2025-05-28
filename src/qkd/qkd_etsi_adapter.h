@@ -97,6 +97,16 @@ bool qkd_get_key(qkd_handle_t handle);
 bool qkd_is_key_id_null(qkd_handle_t handle);
 
 /**
+ * Get the stored key ID from the handle without generating a new one
+ * Used in server-initiated mode to retrieve a previously generated key ID
+ *
+ * @param handle      QKD handle containing the stored key ID
+ * @param key_id      pointer to store the retrieved key ID (caller must free)
+ * @return            TRUE if successful and key ID exists, FALSE otherwise
+ */
+bool qkd_get_stored_key_id(qkd_handle_t handle, chunk_t *key_id);
+
+/**
  * Get the shared secret key from the handle
  *
  * @param handle        QKD handle

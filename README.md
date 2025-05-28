@@ -4,7 +4,24 @@ This repository contains plugins for strongSwan that implement quantum key distr
 
 ## Building and Installing
 
-**Note:** Tested in Ubuntu 22.04.
+**Note:** Tested in Ubuntu 22.04 and Ubuntu 24.04.
+
+### QKD Configuration Options
+
+The plugins support different configuration options:
+
+**QKD Initiation Mode:**
+
+- `--with-qkd-initiation-mode=client` (default): Client initiates QKD key exchange
+- `--with-qkd-initiation-mode=server`: Server initiates QKD key exchange
+
+**ETSI API Version:**
+
+- `--with-etsi-api-version=014` (default): Use ETSI GS QKD 014 API
+- `--with-etsi-api-version=004`: Use ETSI GS QKD 004 API
+
+
+### Building the Plugins
 
 First build strongSwan with the following options:
 
@@ -24,7 +41,9 @@ Configure the build system:
 ./configure --with-strongswan-headers=/usr/include/strongswan \
             --with-plugin-dir=/usr/lib/ipsec/plugins \
             --with-qkd-etsi-api=/usr/local \
-            --with-qkd-kem-provider=/usr/local
+            --with-qkd-kem-provider=/usr/local \
+            --with-qkd-initiation-mode=client \
+            --with-etsi-api-version=014
 ```
 
 Build and install the plugins:

@@ -56,9 +56,10 @@ METHOD(key_exchange_t, get_public_key, bool, private_qkd_kex_t *this,
         return FALSE;
     }
 
-    // If key_id is NULL, this is Alice generating the initial key_id
+#ifdef QKD_CLIENT_INITIATED
+    // Client-initiated logic: IKE initiator (Alice) generates key_id
     if (qkd_is_key_id_null(this->handle)) {
-        DBG1(DBG_LIB, "QKD_plugin: Alice generating key ID");
+        DBG1(DBG_LIB, "QKD_plugin: IKE initiator generating key ID");
         chunk_t key_id;
         if (!qkd_get_key_id(this->handle, &key_id)) {
             DBG1(DBG_LIB, "QKD_plugin: failed to get key ID");
@@ -68,13 +69,33 @@ METHOD(key_exchange_t, get_public_key, bool, private_qkd_kex_t *this,
         chunk_clear(&key_id);
         return TRUE;
     } else {
-        // This is Bob, send empty response
-        DBG1(DBG_LIB, "QKD_plugin: Bob sending empty response");
+        DBG1(DBG_LIB, "QKD_plugin: IKE responder sending empty response");
         *value = chunk_empty;
         return TRUE;
     }
 
-    return FALSE; /* Should never reach here */
+#elif defined(QKD_SERVER_INITIATED)
+    // Server-initiated logic
+    if (qkd_is_key_id_null(this->handle)) {
+        // No key_id yet - send empty
+        DBG1(DBG_LIB, "QKD_plugin: Sending empty (server-initiated mode)");
+        *value = chunk_empty;
+        return TRUE;
+    } else {
+        // We have a key_id in handle - send it (Bob's role)
+        DBG1(DBG_LIB, "QKD_plugin: IKE responder sending generated key ID "
+                      "(server-initiated mode)");
+
+        chunk_t stored_key_id;
+        if (!qkd_get_stored_key_id(this->handle, &stored_key_id)) {
+            DBG1(DBG_LIB, "QKD_plugin: failed to get stored key ID");
+            return FALSE;
+        }
+        *value = chunk_clone(stored_key_id);
+        chunk_clear(&stored_key_id);
+        return TRUE;
+    }
+#endif
 }
 
 METHOD(key_exchange_t, set_public_key, bool, private_qkd_kex_t *this,
@@ -84,9 +105,11 @@ METHOD(key_exchange_t, set_public_key, bool, private_qkd_kex_t *this,
         return FALSE;
     }
 
-    // Bob receives key_id from Alice
+#ifdef QKD_CLIENT_INITIATED
+    // Client-initiated: IKE responder (Bob) receives key_id from IKE initiator
+    // (Alice)
     if (qkd_is_key_id_null(this->handle)) {
-        DBG1(DBG_LIB, "QKD_plugin: Bob receiving key ID");
+        DBG1(DBG_LIB, "QKD_plugin: IKE responder receiving key ID");
         if (value.len != QKD_KEY_ID_SIZE) {
             DBG1(DBG_LIB, "QKD_plugin: invalid key ID received");
             return FALSE;
@@ -102,16 +125,55 @@ METHOD(key_exchange_t, set_public_key, bool, private_qkd_kex_t *this,
             return FALSE;
         }
 
-        DBG1(DBG_LIB,
-             "QKD_plugin: Bob successfully fetched key using Alice's key ID");
+        DBG1(DBG_LIB, "QKD_plugin: IKE responder successfully fetched key "
+                      "using initiator's key ID");
         return TRUE;
     } else {
-        // Alice receives empty response from Bob
-        DBG1(DBG_LIB, "QKD_plugin: Alice receiving empty response");
+        // IKE initiator receives empty response from responder
+        DBG1(DBG_LIB, "QKD_plugin: IKE initiator receiving empty response");
         return TRUE;
     }
 
-    return FALSE; /* Should never reach here */
+#elif defined(QKD_SERVER_INITIATED)
+    // Server-initiated: Use received value to determine role
+    if (value.len == 0) {
+        // Received empty chunk - we're the IKE responder (Bob), generate key_id
+        DBG1(DBG_LIB, "QKD_plugin: IKE responder receiving empty request - "
+                      "generating key ID");
+
+        // Generate key_id and store it in handle
+        chunk_t key_id;
+        if (!qkd_get_key_id(this->handle, &key_id)) {
+            DBG1(DBG_LIB, "QKD_plugin: failed to generate key ID");
+            return FALSE;
+        }
+        chunk_clear(&key_id); // key_id is now stored in handle->key_id
+        return TRUE;
+
+    } else if (value.len == QKD_KEY_ID_SIZE) {
+        // Received a key_id - we're the IKE initiator (Alice)
+        DBG1(DBG_LIB,
+             "QKD_plugin: IKE initiator receiving key ID from responder");
+
+        if (!qkd_set_key_id(this->handle, value)) {
+            DBG1(DBG_LIB, "QKD_plugin: failed to store key ID");
+            return FALSE;
+        }
+
+        if (!qkd_get_key(this->handle)) {
+            DBG1(DBG_LIB, "QKD_plugin: failed to fetch key using key ID");
+            return FALSE;
+        }
+
+        DBG1(DBG_LIB, "QKD_plugin: IKE initiator successfully fetched key "
+                      "using responder's key ID");
+        return TRUE;
+    } else {
+        DBG1(DBG_LIB, "QKD_plugin: invalid key ID size received: %zu",
+             value.len);
+        return FALSE;
+    }
+#endif
 }
 
 METHOD(key_exchange_t, get_shared_secret, bool, private_qkd_kex_t *this,

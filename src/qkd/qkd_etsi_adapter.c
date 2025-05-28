@@ -208,6 +208,24 @@ bool qkd_is_key_id_null(qkd_handle_t handle) {
     return handle->key_id.ptr == NULL;
 }
 
+bool qkd_get_stored_key_id(qkd_handle_t handle, chunk_t *key_id) {
+    DBG1(DBG_LIB, "QKD_plugin: qkd_get_stored_key_id() called");
+
+    if (!handle || !handle->is_open || !key_id) {
+        DBG1(DBG_LIB, "QKD_plugin: Invalid parameters in get_stored_key_id");
+        return FALSE;
+    }
+
+    if (handle->key_id.len == 0 || handle->key_id.ptr == NULL) {
+        DBG1(DBG_LIB, "QKD_plugin: No key ID stored in handle");
+        return FALSE;
+    }
+
+    *key_id = chunk_clone(handle->key_id);
+    qkd_print_key_id("Retrieved stored", handle->key_id);
+    return TRUE;
+}
+
 bool qkd_set_key_id(qkd_handle_t handle, chunk_t key_id) {
     DBG1(DBG_LIB, "QKD_plugin: qkd_set_key_id() called");
 
