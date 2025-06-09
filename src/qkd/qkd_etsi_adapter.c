@@ -44,6 +44,12 @@ struct qkd_handle_t {
 #define ENV_MASTER_SAE "QKD_MASTER_SAE"
 #define ENV_SLAVE_SAE "QKD_SLAVE_SAE"
 #define ENV_QKD_BACKEND "QKD_BACKEND"
+#define ENV_QKD_SOURCE_URI "QKD_SOURCE_URI"
+#define ENV_QKD_DEST_URI "QKD_DEST_URI"
+#define ENV_QKD_CLIENT_PORT "QKD_CLIENT_PORT"
+#define ENV_QKD_SERVER_PORT "QKD_SERVER_PORT"
+#define ENV_QKD_CLIENT_HOST "QKD_CLIENT_HOST"
+#define ENV_QKD_SERVER_HOST "QKD_SERVER_HOST"
 
 void qkd_print_key_id(const char *prefix, chunk_t key_id) {
     char hex[256] = "";
@@ -91,6 +97,63 @@ static unsigned char *base64_decode(const char *in, size_t *outlen) {
 }
 #endif /* ETSI_014_API */
 
+#ifdef ETSI_004_API
+// Helper function to construct URIs from environment for ETSI 004
+static void construct_uris_from_env(qkd_handle_t handle, char *source_uri, char *dest_uri,
+                                    size_t uri_size, bool is_initiator) {
+    // Try to get complete URIs first (highest priority)
+    const char *env_source_uri = getenv(ENV_QKD_SOURCE_URI);
+    const char *env_dest_uri = getenv(ENV_QKD_DEST_URI);
+
+    if (env_source_uri && env_dest_uri) {
+        // Use complete URIs from environment
+        snprintf(source_uri, uri_size, "%s", env_source_uri);
+        snprintf(dest_uri, uri_size, "%s", env_dest_uri);
+        DBG1(DBG_LIB, "QKD_plugin: Using complete URIs from environment:");
+        DBG1(DBG_LIB, "  Source: %s", source_uri);
+        DBG1(DBG_LIB, "  Destination: %s", dest_uri);
+        return;
+    }
+
+    // Fallback: construct URIs from individual components
+    const char *client_host = getenv(ENV_QKD_CLIENT_HOST);
+    const char *server_host = getenv(ENV_QKD_SERVER_HOST);
+    const char *client_port = getenv(ENV_QKD_CLIENT_PORT);
+    const char *server_port = getenv(ENV_QKD_SERVER_PORT);
+
+    // Set defaults if not provided (use Docker service names and ports)
+    if (!client_host) client_host = "qkd_server_alice";  // Default Alice QKD server
+    if (!server_host) server_host = "qkd_server_bob";    // Default Bob QKD server
+    if (!client_port) client_port = "25575";             // Default Alice port
+    if (!server_port) server_port = "25576";             // Default Bob port
+
+    // For backward compatibility, also check legacy KME hostnames
+    if (strcmp(client_host, "qkd_server_alice") == 0 && handle->master_kme && 
+        strcmp(handle->master_kme, "localhost") != 0) {
+        client_host = handle->master_kme;
+    }
+    if (strcmp(server_host, "qkd_server_bob") == 0 && handle->slave_kme && 
+        strcmp(handle->slave_kme, "localhost") != 0) {
+        server_host = handle->slave_kme;
+    }
+
+    if (is_initiator) {
+        // Alice (initiator): client -> server
+        snprintf(source_uri, uri_size, "client://%s:%s", client_host, client_port);
+        snprintf(dest_uri, uri_size, "server://%s:%s", server_host, server_port);
+    } else {
+        // Bob (responder): use same endpoints but different perspective
+        snprintf(source_uri, uri_size, "client://%s:%s", client_host, client_port);
+        snprintf(dest_uri, uri_size, "server://%s:%s", server_host, server_port);
+    }
+
+    DBG1(DBG_LIB, "QKD_plugin: Constructed URIs from components (%s):", 
+         is_initiator ? "initiator" : "responder");
+    DBG1(DBG_LIB, "  Source: %s", source_uri);
+    DBG1(DBG_LIB, "  Destination: %s", dest_uri);
+}
+#endif /* ETSI_004_API */
+
 bool qkd_open(qkd_handle_t *handle) {
     DBG1(DBG_LIB, "QKD_plugin: qkd_open called");
 
@@ -113,13 +176,14 @@ bool qkd_open(qkd_handle_t *handle) {
 #endif
 
     /* Get configuration from environment variables */
-    const char *master_kme = getenv("QKD_MASTER_KME_HOSTNAME");
-    const char *slave_kme = getenv("QKD_SLAVE_KME_HOSTNAME");
-    const char *master_sae = getenv("QKD_MASTER_SAE");
-    const char *slave_sae = getenv("QKD_SLAVE_SAE");
-    const char *qkd_backend = getenv("QKD_BACKEND");
+    const char *master_kme = getenv(ENV_MASTER_KME);
+    const char *slave_kme = getenv(ENV_SLAVE_KME);
+    const char *master_sae = getenv(ENV_MASTER_SAE);
+    const char *slave_sae = getenv(ENV_SLAVE_SAE);
+    const char *qkd_backend = getenv(ENV_QKD_BACKEND);
 
     bool is_qukaydee = (qkd_backend && strcmp(qkd_backend, "qukaydee") == 0);
+    bool is_python_client = (qkd_backend && strcmp(qkd_backend, "python_client") == 0);
 
     if (!master_kme || !slave_kme || !master_sae || !slave_sae) {
         DBG1(DBG_LIB, "QKD_plugin: missing required environment variables, "
@@ -130,8 +194,14 @@ bool qkd_open(qkd_handle_t *handle) {
                           "environment variables not set!");
         }
 
-        master_kme = "localhost";
-        slave_kme = "localhost";
+        // For ETSI 004 with python_client, use Docker service names as defaults
+        if (is_python_client) {
+            master_kme = "qkd_server_alice";
+            slave_kme = "qkd_server_bob";
+        } else {
+            master_kme = "localhost";
+            slave_kme = "localhost";
+        }
         master_sae = "sae-1";
         slave_sae = "sae-2";
     }
@@ -141,22 +211,38 @@ bool qkd_open(qkd_handle_t *handle) {
     (*handle)->master_sae = strdup(master_sae);
     (*handle)->slave_sae = strdup(slave_sae);
 
+    const char *backend_name = "Simulated";
+    if (is_qukaydee) backend_name = "QuKayDee";
+    else if (is_python_client) backend_name = "Python Client";
+
     DBG1(DBG_LIB, "QKD_plugin: opened QKD connection with parameters:");
-    DBG1(DBG_LIB, "  Backend: %s", is_qukaydee ? "QuKayDee" : "Simulated");
+    DBG1(DBG_LIB, "  Backend: %s", backend_name);
     DBG1(DBG_LIB, "  Master KME: %s", (*handle)->master_kme);
     DBG1(DBG_LIB, "  Slave KME: %s", (*handle)->slave_kme);
     DBG1(DBG_LIB, "  Master SAE: %s", (*handle)->master_sae);
     DBG1(DBG_LIB, "  Slave SAE: %s", (*handle)->slave_sae);
 
 #ifdef ETSI_004_API
-    (*handle)->qos.Key_chunk_size = QKD_KEY_SIZE;
-    (*handle)->qos.Timeout = 60000;
+    // Configure QoS parameters - these can also be made configurable via environment
+    const char *key_chunk_size_env = getenv("QKD_KEY_CHUNK_SIZE");
+    const char *timeout_env = getenv("QKD_TIMEOUT");
+    const char *max_bps_env = getenv("QKD_MAX_BPS");
+    const char *min_bps_env = getenv("QKD_MIN_BPS");
+
+    (*handle)->qos.Key_chunk_size = key_chunk_size_env ? atoi(key_chunk_size_env) : QKD_KEY_SIZE;
+    (*handle)->qos.Timeout = timeout_env ? atoi(timeout_env) : 60000;
     (*handle)->qos.Priority = 0;
-    (*handle)->qos.Max_bps = 40000;
-    (*handle)->qos.Min_bps = 5000;
+    (*handle)->qos.Max_bps = max_bps_env ? atoi(max_bps_env) : 40000;
+    (*handle)->qos.Min_bps = min_bps_env ? atoi(min_bps_env) : 5000;
     (*handle)->qos.Jitter = 10;
     (*handle)->qos.TTL = 3600;
     strcpy((*handle)->qos.Metadata_mimetype, "application/json");
+
+    DBG1(DBG_LIB, "QKD_plugin: QoS configuration:");
+    DBG1(DBG_LIB, "  Key chunk size: %u", (*handle)->qos.Key_chunk_size);
+    DBG1(DBG_LIB, "  Timeout: %u ms", (*handle)->qos.Timeout);
+    DBG1(DBG_LIB, "  Max BPS: %u", (*handle)->qos.Max_bps);
+    DBG1(DBG_LIB, "  Min BPS: %u", (*handle)->qos.Min_bps);
 #endif
 
     return TRUE;
@@ -178,10 +264,10 @@ bool qkd_close(qkd_handle_t handle) {
         if (result == 0 && (status == QKD_STATUS_SUCCESS ||
                             status == QKD_STATUS_PEER_NOT_CONNECTED)) {
             handle->is_connected = FALSE;
-            DBG1(DBG_LIB,
-                 "QKD_plugin: ETSI 004 connection closed successfully");
+            DBG1(DBG_LIB, "QKD_plugin: ETSI 004 connection closed successfully");
         } else {
-            DBG1(DBG_LIB, "QKD_plugin: Failed to close ETSI 004 connection");
+            DBG1(DBG_LIB, "QKD_plugin: Failed to close ETSI 004 connection, result=%u, status=%u", 
+                 result, status);
         }
     }
 #endif
@@ -208,26 +294,8 @@ bool qkd_is_key_id_null(qkd_handle_t handle) {
     return handle->key_id.ptr == NULL;
 }
 
-bool qkd_get_stored_key_id(qkd_handle_t handle, chunk_t *key_id) {
-    DBG1(DBG_LIB, "QKD_plugin: qkd_get_stored_key_id() called");
-
-    if (!handle || !handle->is_open || !key_id) {
-        DBG1(DBG_LIB, "QKD_plugin: Invalid parameters in get_stored_key_id");
-        return FALSE;
-    }
-
-    if (handle->key_id.len == 0 || handle->key_id.ptr == NULL) {
-        DBG1(DBG_LIB, "QKD_plugin: No key ID stored in handle");
-        return FALSE;
-    }
-
-    *key_id = chunk_clone(handle->key_id);
-    qkd_print_key_id("Retrieved stored", handle->key_id);
-    return TRUE;
-}
-
 bool qkd_set_key_id(qkd_handle_t handle, chunk_t key_id) {
-    DBG1(DBG_LIB, "QKD_plugin: qkd_set_key_id() called");
+    DBG1(DBG_LIB, "QKD_plugin: qkd_set_key_id() called (Bob/responder)");
 
     if (!handle || !handle->is_open || key_id.len != QKD_KEY_ID_SIZE) {
         DBG1(DBG_LIB, "QKD_plugin: Invalid parameters in set_key_id");
@@ -242,12 +310,10 @@ bool qkd_set_key_id(qkd_handle_t handle, chunk_t key_id) {
 #ifdef ETSI_004_API
     /* For ETSI 004, Bob would initiate connection here using the key ID */
     if (!handle->is_connected) {
+        char source_uri[512], dest_uri[512];
 
-        char source_uri[256], dest_uri[256];
-        snprintf(source_uri, sizeof(source_uri), "qkd://%s:1234",
-                 handle->slave_kme);
-        snprintf(dest_uri, sizeof(dest_uri), "qkd://%s:5678",
-                 handle->master_kme);
+        // Bob is responder, so is_initiator = false
+        construct_uris_from_env(handle, source_uri, dest_uri, sizeof(source_uri), false);
 
         uint32_t status;
 
@@ -275,7 +341,7 @@ bool qkd_set_key_id(qkd_handle_t handle, chunk_t key_id) {
 }
 
 bool qkd_get_key_id(qkd_handle_t handle, chunk_t *key_id) {
-    DBG1(DBG_LIB, "QKD_plugin: qkd_get_key_id() called");
+    DBG1(DBG_LIB, "QKD_plugin: qkd_get_key_id() called (Alice/initiator)");
 
     if (!handle || !handle->is_open || !key_id) {
         DBG1(DBG_LIB, "QKD_plugin: Invalid parameters in get_key_id");
@@ -288,19 +354,19 @@ bool qkd_get_key_id(qkd_handle_t handle, chunk_t *key_id) {
 
     /* If not connected, establish connection first */
     if (!handle->is_connected) {
-        char source_uri[256], dest_uri[256];
-        snprintf(source_uri, sizeof(source_uri), "qkd://%s:1234",
-                 handle->master_kme);
-        snprintf(dest_uri, sizeof(dest_uri), "qkd://%s:5678",
-                 handle->slave_kme);
+        char source_uri[512], dest_uri[512];
+
+        // Alice is initiator, so is_initiator = true
+        construct_uris_from_env(handle, source_uri, dest_uri, sizeof(source_uri), true);
 
         unsigned char key_stream_id[QKD_KEY_ID_SIZE] = {0};
 
         uint32_t result = OPEN_CONNECT(source_uri, dest_uri, &handle->qos,
                                        key_stream_id, &status);
 
-        if (result != 0 || (status != QKD_STATUS_SUCCESS &&
-                            status != QKD_STATUS_PEER_NOT_CONNECTED)) {
+        if (result != 0 ||
+            (status != QKD_STATUS_SUCCESS && status != QKD_STATUS_PEER_NOT_CONNECTED && 
+             status != QKD_STATUS_QOS_NOT_MET)) {
             DBG1(DBG_LIB,
                  "QKD_plugin: Failed to establish ETSI 004 connection, "
                  "result=%u, status=%u",
@@ -317,6 +383,10 @@ bool qkd_get_key_id(qkd_handle_t handle, chunk_t *key_id) {
         *key_id = chunk_clone(handle->key_id);
 
         qkd_print_key_id("Generated (ETSI 004)", handle->key_id);
+        
+        if (status == QKD_STATUS_QOS_NOT_MET) {
+            DBG1(DBG_LIB, "QKD_plugin: Connection established with adjusted QoS parameters");
+        }
 
         return TRUE;
     } else {
