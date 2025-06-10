@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 #include <utils/debug.h>
 
 typedef struct private_qkd_kex_t private_qkd_kex_t;
@@ -22,6 +23,7 @@ struct private_qkd_kex_t {
     key_exchange_method_t method;
     qkd_handle_t handle;
     struct timeval create_time;
+    bool key_retrieved;
 };
 
 #define QKD_TIMING_LOG "/tmp/plugin_timing.csv"
@@ -49,12 +51,43 @@ static void log_time(private_qkd_kex_t *this) {
          this->method);
 }
 
+// Helper to determine if we're in ETSI 004 mode
+static bool is_etsi_004_mode(void) {
+    const char *api_version = getenv("ETSI_API_VERSION");
+    return (api_version && strcmp(api_version, "004") == 0);
+}
+
 METHOD(key_exchange_t, get_public_key, bool, private_qkd_kex_t *this,
        chunk_t *value) {
     DBG1(DBG_LIB, "QKD_plugin: get_public_key()");
     if (!this || !value) {
         return FALSE;
     }
+
+#ifdef ETSI_004_API
+    // ETSI 004: Initiator calls get_public_key first and generates key_id
+    if (qkd_is_key_id_null(this->handle)) {
+        DBG1(DBG_LIB, "QKD_plugin: ETSI 004 - generating key ID (initiator)");
+        chunk_t key_id;
+        if (!qkd_get_key_id(this->handle, &key_id)) {
+            DBG1(DBG_LIB, "QKD_plugin: failed to generate key ID");
+            return FALSE;
+        }
+        *value = chunk_clone(key_id);
+        chunk_clear(&key_id);
+        return TRUE;
+    } else {
+        DBG1(DBG_LIB, "QKD_plugin: ETSI 004 - returning stored key ID");
+        chunk_t stored_key_id;
+        if (!qkd_get_stored_key_id(this->handle, &stored_key_id)) {
+            DBG1(DBG_LIB, "QKD_plugin: failed to get stored key ID");
+            return FALSE;
+        }
+        *value = chunk_clone(stored_key_id);
+        chunk_clear(&stored_key_id);
+        return TRUE;
+    }
+#endif
 
 #ifdef QKD_CLIENT_INITIATED
     // Client-initiated logic: IKE initiator (Alice) generates key_id
@@ -104,6 +137,53 @@ METHOD(key_exchange_t, set_public_key, bool, private_qkd_kex_t *this,
     if (!this) {
         return FALSE;
     }
+
+#ifdef ETSI_004_API
+    // ETSI 004:
+    if (qkd_is_key_id_null(this->handle)) {
+        // We don't have a key_id yet, so we're the responder
+        // Receive initiator's key_id and use it
+        DBG1(DBG_LIB, "QKD_plugin: ETSI 004 - responder receiving key ID");
+        if (value.len != QKD_KEY_ID_SIZE) {
+            DBG1(DBG_LIB, "QKD_plugin: invalid key ID received");
+            return FALSE;
+        }
+
+        if (!qkd_set_key_id(this->handle, value)) {
+            DBG1(DBG_LIB, "QKD_plugin: failed to store key ID");
+            return FALSE;
+        }
+
+        if (!qkd_get_key(this->handle)) {
+            DBG1(DBG_LIB, "QKD_plugin: failed to fetch key using key ID");
+            return FALSE;
+        }
+
+        this->key_retrieved = true;
+        DBG1(DBG_LIB,
+             "QKD_plugin: ETSI 004 - responder successfully fetched key "
+             "using initiator's key ID");
+        return TRUE;
+    } else {
+        // We already have a key_id, so we're the initiator
+        // Receive responder's key_id but use our own for key retrieval
+        DBG1(DBG_LIB,
+             "QKD_plugin: ETSI 004 - initiator receiving responder key ID");
+
+        // For ETSI 004, initiator needs to retrieve key using own key_id
+        if (!this->key_retrieved) {
+            if (!qkd_get_key(this->handle)) {
+                DBG1(DBG_LIB,
+                     "QKD_plugin: failed to fetch key using stored key ID");
+                return FALSE;
+            }
+            this->key_retrieved = true;
+            DBG1(DBG_LIB,
+                 "QKD_plugin: ETSI 004 - initiator successfully fetched key");
+        }
+        return TRUE;
+    }
+#endif
 
 #ifdef QKD_CLIENT_INITIATED
     // Client-initiated: IKE responder (Bob) receives key_id from IKE initiator
@@ -185,6 +265,17 @@ METHOD(key_exchange_t, get_shared_secret, bool, private_qkd_kex_t *this,
         return FALSE;
     }
 
+    // For ETSI 004, ensure we've retrieved our key first
+    if (is_etsi_004_mode() && !this->key_retrieved) {
+        DBG1(DBG_LIB,
+             "QKD_plugin: ETSI 004 - retrieving key before sharing secret");
+        if (!qkd_get_key(this->handle)) {
+            DBG1(DBG_LIB, "QKD_plugin: ETSI 004 - failed to retrieve key");
+            return FALSE;
+        }
+        this->key_retrieved = true;
+    }
+
     if (!qkd_get_shared_secret(this->handle, secret)) {
         DBG1(DBG_LIB, "QKD_plugin: failed to get shared secret");
         return FALSE;
@@ -205,9 +296,9 @@ METHOD(key_exchange_t, destroy, void, private_qkd_kex_t *this) {
         if (this->handle) {
             qkd_close(this->handle);
         }
+        log_time(this);
         free(this);
     }
-    log_time(this);
 }
 
 METHOD(key_exchange_t, get_method, key_exchange_method_t,
@@ -240,7 +331,7 @@ qkd_kex_t *qkd_kex_create(key_exchange_method_t method) {
                      },
                  .shared_secret = chunk_empty,
              },
-         .method = method, .handle = NULL);
+         .method = method, .handle = NULL, .key_retrieved = false);
 
     gettimeofday(&this->create_time, NULL);
 
@@ -249,6 +340,13 @@ qkd_kex_t *qkd_kex_create(key_exchange_method_t method) {
         return NULL;
     }
 
-    DBG1(DBG_LIB, "QKD_plugin: key exchange object created");
+    if (is_etsi_004_mode()) {
+        DBG1(DBG_LIB,
+             "QKD_plugin: key exchange object created (ETSI 004 mode)");
+    } else {
+        DBG1(DBG_LIB,
+             "QKD_plugin: key exchange object created (ETSI 014 mode)");
+    }
+
     return &this->public;
 }
