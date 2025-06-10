@@ -64,7 +64,7 @@ void qkd_print_key_id(const char *prefix, chunk_t key_id) {
 void qkd_print_key(const char *prefix, chunk_t key) {
     char hex[2048] = "";
     chunk_to_hex(key, hex, FALSE);
-    DBG1(DBG_LIB, "QKD_plugin: %s key: %s", prefix, key);
+    DBG1(DBG_LIB, "QKD_plugin: %s key: %s", prefix, hex);
 }
 
 #ifdef ETSI_014_API
