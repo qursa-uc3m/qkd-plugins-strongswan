@@ -288,10 +288,12 @@ bool qkd_set_key_id(qkd_handle_t handle, chunk_t key_id) {
     if (!handle->is_connected) {
         uint32_t status;
 
+        unsigned char key_stream_id[QKD_KEY_ID_SIZE];
+        memcpy(key_stream_id, handle->key_id.ptr, QKD_KEY_ID_SIZE);
+
         /* Call OPEN_CONNECT to establish connection with received key ID */
-        uint32_t result =
-            OPEN_CONNECT(handle->source_uri, handle->dest_uri, &handle->qos,
-                         handle->key_id.ptr, &status);
+        uint32_t result = OPEN_CONNECT(handle->source_uri, handle->dest_uri,
+                                       &handle->qos, key_stream_id, &status);
 
         if (result != 0 || (status != QKD_STATUS_SUCCESS &&
                             status != QKD_STATUS_PEER_NOT_CONNECTED &&
