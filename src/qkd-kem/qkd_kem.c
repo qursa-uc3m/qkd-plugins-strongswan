@@ -226,7 +226,7 @@ static bool encaps_shared_secret(private_qkd_kem_t *this, chunk_t value) {
     }
 
     if (this->shared_secret) {
-        OPENSSL_clear_free(this->shared_secret, this->shared_secret_len);
+        OPENSSL_secure_clear_free(this->shared_secret, this->shared_secret_len);
         this->shared_secret = NULL;
     }
 
@@ -333,15 +333,25 @@ static bool set_ciphertext(private_qkd_kem_t *this, chunk_t value) {
          this->shared_secret_len);
 
     if (this->shared_secret) {
-        OPENSSL_free(this->shared_secret);
+        OPENSSL_secure_clear_free(this->shared_secret, this->shared_secret_len);
+        this->shared_secret = NULL;
     }
-    this->shared_secret = OPENSSL_malloc(this->shared_secret_len);
+
+    this->shared_secret = OPENSSL_secure_malloc(this->shared_secret_len);
+    if (!this->shared_secret) {
+        DBG1(DBG_LIB, "QKD-KEM plugin: Failed to allocate secure memory for "
+                      "shared secret");
+        return FALSE;
+    }
 
     if (!EVP_PKEY_decapsulate(this->ctx, this->shared_secret,
                               &this->shared_secret_len, value.ptr, value.len)) {
         err = ERR_get_error();
         ERR_error_string_n(err, err_buf, sizeof(err_buf));
         DBG1(DBG_LIB, "QKD-KEM plugin: Decapsulation failed: %s", err_buf);
+
+        OPENSSL_secure_clear_free(this->shared_secret, this->shared_secret_len);
+        this->shared_secret = NULL;
         return FALSE;
     }
 
@@ -551,7 +561,7 @@ METHOD(key_exchange_t, destroy, void, private_qkd_kem_t *this) {
     }
 
     if (this->shared_secret) {
-        OPENSSL_clear_free(this->shared_secret, this->shared_secret_len);
+        OPENSSL_secure_clear_free(this->shared_secret, this->shared_secret_len);
         this->shared_secret = NULL;
     }
 
